@@ -342,7 +342,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sxrust"
+name = "loser"
 version = "0.1.0"
 dependencies = [
  "json",
