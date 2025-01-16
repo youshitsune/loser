@@ -84,55 +84,59 @@ fn idf(term: &String, index_table: &HashMap<PathBuf, HashMap<String, usize>>) ->
     return (((index_table.len()+1) as f32)/(n as f32)).log10();
 }
 
-fn search(query: &[char]) -> Vec<String>{
-    let index_file = fs::File::open(INDEX);
-    let index_table: HashMap<PathBuf, HashMap<String, usize>> = serde_json::from_reader(index_file.unwrap()).unwrap();
-
-    let mut r = HashMap::<PathBuf, f32>::new();
-    for token in Tokenizer::new(&query){
-        let term = token.iter().collect::<String>();
-        let idfv = idf(&term, &index_table);
-
-        for (path, doc) in index_table.iter() {
-            let t = tf(&term, &doc)*idfv;
-
-            if let Some(count) = r.get_mut(&path.to_path_buf()){
-                *count += t;
-            } else {
-                r.insert(path.to_path_buf(), t);
-            }
-        }
-    }
-    let mut stats: Vec<(PathBuf, f32)> = vec![];
-    for (i, j) in r.iter() {
-        stats.push((i.clone(), j.clone()));
-    }
-    stats.sort_by(|a, b| {(b.1).partial_cmp(&a.1).unwrap()});
-    let mut results: Vec<String> = vec![];
-
-    if stats.len() > 10 {
-        for i in 0..10{
-            if stats[i].1 > 0.0 {
-                results.push(stats[i].0.to_str().unwrap().to_string());
-            }
-        }
-        return results
-    } 
-
-    for i in 0..stats.len(){
-        if stats[i].1 > 0.0 {
-            results.push(stats[i].0.to_str().unwrap().to_string());
-        }
-    }
-
-    return results
-}
 
 fn root(req: Request) {
     let response = Response::from_file(File::open("/home/youshitsune/Projects/loser/src/index.html").unwrap());
     req.respond(response).expect("Can't respond");
 }
 
+fn search(query: &[char]) -> Option<Vec<String>>{
+    if fs::exists(INDEX).unwrap() {
+        let index_file = fs::File::open(INDEX);
+        let index_table: HashMap<PathBuf, HashMap<String, usize>> = serde_json::from_reader(index_file.unwrap()).unwrap();
+
+        let mut r = HashMap::<PathBuf, f32>::new();
+        for token in Tokenizer::new(&query){
+            let term = token.iter().collect::<String>();
+            let idfv = idf(&term, &index_table);
+
+            for (path, doc) in index_table.iter() {
+                let t = tf(&term, &doc)*idfv;
+
+                if let Some(count) = r.get_mut(&path.to_path_buf()){
+                    *count += t;
+                } else {
+                    r.insert(path.to_path_buf(), t);
+                }
+            }
+        }
+        let mut stats: Vec<(PathBuf, f32)> = vec![];
+        for (i, j) in r.iter() {
+            stats.push((i.clone(), j.clone()));
+        }
+        stats.sort_by(|a, b| {(b.1).partial_cmp(&a.1).unwrap()});
+        let mut results: Vec<String> = vec![];
+
+        if stats.len() > 10 {
+            for i in 0..10{
+                if stats[i].1 > 0.0 {
+                    results.push(stats[i].0.to_str().unwrap().to_string());
+                }
+            }
+            return Some(results)
+        } 
+
+        for i in 0..stats.len(){
+            if stats[i].1 > 0.0 {
+                results.push(stats[i].0.to_str().unwrap().to_string());
+            }
+        }
+
+        return Some(results)
+    }
+
+    return None
+}
 fn searchapi(mut req: Request) {
     let mut body = String::new();
     let _ = req.as_reader().read_to_string(&mut body).unwrap();
@@ -140,30 +144,16 @@ fn searchapi(mut req: Request) {
     let data = json_data["query"].to_string();
     let query = data.chars().map(|x| {x.to_ascii_uppercase()}).collect::<Vec<_>>();
     let r = search(&query);
-    let rd = json::stringify(&r[0..]);
-    req.respond(Response::from_string(&rd)).expect("Can't respond");
+    if r != None {
+        let rd = json::stringify(&r.unwrap()[0..]);
+        req.respond(Response::from_string(&rd)).expect("Can't respond");
+    } else {
+        req.respond(Response::from_string("You need to reindex files first")).expect("Can't respond");
+    }
 }
 
-fn main(){
-    if fs::exists(INDEX).unwrap(){
-
-        let server = Server::http("0.0.0.0:8080").unwrap();
-
-        loop {
-            let request = match server.recv() {
-                Ok(rq) => rq,
-                Err(e) => {eprintln!("ERROR: {}", e); break},
-            };
-
-            match request.url(){
-                "/" => {root(request)},
-                "/search" => {searchapi(request)},
-                _ => {request.respond(Response::from_string("Path doesn't exist")).expect("Can't respond")},
-            };
-        }
-
-    } else {
-        let path = "files/";
+fn reindex(path: &str) -> bool {
+    if fs::exists(path).unwrap() {
         let dir = fs::read_dir(path).unwrap();
 
         let mut tf = HashMap::<PathBuf, HashMap<String, usize>>::new();
@@ -172,8 +162,6 @@ fn main(){
             let file_path = file.unwrap().path();
             let file_name = file_path.to_str().unwrap();
             let mut map = HashMap::<String, usize>::new();
-
-            println!("Indexing {file_name}...");
 
             if file_name.contains(".md") || file_name.contains(".txt"){
                 let ctx = read_text_file(&file_path);
@@ -203,6 +191,37 @@ fn main(){
         }
         let index_file = fs::File::create_new(INDEX).unwrap();
         serde_json::to_writer_pretty(index_file, &tf).unwrap();
-        println!("Saved {INDEX}")
+        return true
+    }
+    return false
+}
+
+fn indexapi(mut req: Request) {
+    let mut buf = String::new();
+    let _ = req.as_reader().read_to_string(&mut buf);
+    let data = json::parse(&buf).unwrap();
+    println!("{data:?}");
+    if reindex(&data["data"].to_string()) {
+        req.respond(Response::from_string("Reindexing completed")).expect("Can't respond");
+    } else {
+        req.respond(Response::from_string("Path doesn't exist")).expect("Can't respond");
+    }
+}
+
+fn main(){
+    let server = Server::http("0.0.0.0:8080").unwrap();
+
+    loop {
+        let request = match server.recv() {
+            Ok(rq) => rq,
+            Err(e) => {eprintln!("ERROR: {}", e); break},
+        };
+
+        match request.url(){
+            "/" => {root(request)},
+            "/search" => {searchapi(request)},
+            "/reindex" => {indexapi(request)},
+            _ => {request.respond(Response::from_string("Path doesn't exist")).expect("Can't respond")},
+        };
     }
 }
